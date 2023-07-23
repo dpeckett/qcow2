@@ -39,12 +39,14 @@ const (
 
 func TestQCOW2ImageEndToEnd(t *testing.T) {
 	if _, err := os.Stat(testImage); os.IsNotExist(err) {
+		os.MkdirAll("testdata", 0o755)
+
 		t.Log("Downloading test image...")
 		err := downloadFile(testImage, testImageURL)
 		require.NoError(t, err)
 	}
 
-	input, err := qcow2.Open(testImage)
+	input, err := qcow2.Open(testImage, true)
 	require.NoError(t, err)
 	defer input.Close()
 

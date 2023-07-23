@@ -47,8 +47,16 @@ func Create(path string, size int64) (*Image, error) {
 	}, nil
 }
 
-func Open(path string) (*Image, error) {
-	f, err := os.Open(path)
+func Open(path string, readOnly bool) (*Image, error) {
+	var f *os.File
+	var err error
+
+	if readOnly {
+		f, err = os.OpenFile(path, os.O_RDONLY, 0o444)
+	} else {
+		f, err = os.OpenFile(path, os.O_RDWR, 0o644)
+	}
+
 	if err != nil {
 		return nil, err
 	}
