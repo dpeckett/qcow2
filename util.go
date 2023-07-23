@@ -18,6 +18,7 @@
 package qcow2
 
 import (
+	"io"
 	"os"
 )
 
@@ -61,6 +62,31 @@ func newOffsetWriter(f *os.File, offset int64) *offsetWriter {
 func (w *offsetWriter) Write(p []byte) (int, error) {
 	n, err := w.f.WriteAt(p, w.offset)
 	w.offset += int64(n)
+
+	return n, err
+}
+
+type limitWriter struct {
+	w       io.Writer
+	limit   int64
+	written int64
+}
+
+func newLimitWriter(w io.Writer, limit int64) *limitWriter {
+	return &limitWriter{w: w, limit: limit}
+}
+
+func (w *limitWriter) Write(p []byte) (int, error) {
+	if w.written >= w.limit {
+		return 0, io.EOF
+	}
+
+	if w.written+int64(len(p)) > w.limit {
+		p = p[:w.limit-w.written]
+	}
+
+	n, err := w.w.Write(p)
+	w.written += int64(n)
 
 	return n, err
 }

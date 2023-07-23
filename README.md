@@ -13,4 +13,4 @@ The library is not yet complete. It can read and write most QCOW2 images, but so
 - Backing files
 - External data
 
-You shouldn't use this library in any application that requires data integrity. It has not been tested thoroughly and definitely contains bugs.
+You shouldn't use this library in any application that requires data integrity. It has not been tested thoroughly and definitely will result in data loss.

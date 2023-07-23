@@ -72,6 +72,8 @@ func clusterReader(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64)
 }
 
 func clusterWriter(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64) (io.Writer, error) {
+	clusterSize := int64(1 << hdr.ClusterBits)
+
 	refcount, err := getRefcount(f, hdr, diskOffset)
 	if err != nil {
 		return nil, err
@@ -79,18 +81,20 @@ func clusterWriter(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64)
 
 	var imageOffset int64
 	if refcount == 0 {
-		imageOffset, err = allocateCluster(f, hdr)
+		imageOffsetClusterBase, err := allocateCluster(f, hdr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to allocate cluster: %w", err)
+		}
+
+		if err := storeImageToDiskOffset(f, hdr, imageOffsetClusterBase, alignToClusterBoundary(hdr, diskOffset)); err != nil {
+			return nil, fmt.Errorf("failed to update L2 table: %w", err)
 		}
 
 		if err := setRefcount(f, hdr, diskOffset, 1); err != nil {
 			return nil, fmt.Errorf("failed to update refcount: %w", err)
 		}
 
-		if err := storeImageToDiskOffset(f, hdr, imageOffset, diskOffset); err != nil {
-			return nil, fmt.Errorf("failed to update L2 table: %w", err)
-		}
+		imageOffset = imageOffsetClusterBase + (diskOffset % clusterSize)
 	} else if refcount == 1 {
 		// Perform an in-place write.
 		imageOffset, err = diskToImageOffset(f, hdr, diskOffset)
@@ -99,21 +103,23 @@ func clusterWriter(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64)
 		}
 	} else {
 		// Copy the cluster and perform an in-place write.
-		imageOffset, err = copyCluster(f, hdr, diskOffset)
+		imageOffsetClusterBase, err := copyCluster(f, hdr, diskOffset)
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy cluster: %w", err)
+		}
+
+		if err := storeImageToDiskOffset(f, hdr, imageOffsetClusterBase, alignToClusterBoundary(hdr, diskOffset)); err != nil {
+			return nil, fmt.Errorf("failed to update L2 table: %w", err)
 		}
 
 		if err := setRefcount(f, hdr, diskOffset, 1); err != nil {
 			return nil, fmt.Errorf("failed to update refcount: %w", err)
 		}
 
-		if err := storeImageToDiskOffset(f, hdr, imageOffset, diskOffset); err != nil {
-			return nil, fmt.Errorf("failed to update L2 table: %w", err)
-		}
+		imageOffset = imageOffsetClusterBase + (diskOffset % clusterSize)
 	}
 
-	return newOffsetWriter(f, imageOffset), nil
+	return newLimitWriter(newOffsetWriter(f, imageOffset), int64(clusterSize-(diskOffset%clusterSize))), nil
 }
 
 func allocateCluster(f *os.File, hdr *HeaderAndAdditionalFields) (int64, error) {
@@ -202,7 +208,7 @@ func diskToImageOffset(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset in
 	return l2Entry.Offset(hdr) + (diskOffset % clusterSize), nil
 }
 
-func alignToClusterBoundary(hdr *HeaderAndAdditionalFields, imageOffset int64) int64 {
+func alignToClusterBoundary(hdr *HeaderAndAdditionalFields, offset int64) int64 {
 	clusterSize := int64(1 << hdr.ClusterBits)
-	return clusterSize - (imageOffset % clusterSize)
+	return clusterSize * (offset / clusterSize)
 }

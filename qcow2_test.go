@@ -18,9 +18,11 @@
 package qcow2_test
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
@@ -37,9 +39,10 @@ const (
 	testImageURL = "https://download.cirros-cloud.net/0.5.1/cirros-0.5.1-x86_64-disk.img"
 )
 
-func TestQCOW2ImageEndToEnd(t *testing.T) {
+func TestImageEndToEnd(t *testing.T) {
 	if _, err := os.Stat(testImage); os.IsNotExist(err) {
-		os.MkdirAll("testdata", 0o755)
+		err = os.MkdirAll("testdata", 0o755)
+		require.NoError(t, err)
 
 		t.Log("Downloading test image...")
 		err := downloadFile(testImage, testImageURL)
@@ -78,6 +81,43 @@ func TestQCOW2ImageEndToEnd(t *testing.T) {
 	expectedSum := "f8d297a47fd2017a776a2975919c90ba27131e2083fbf38ca434ba26a8b0dd6e"
 
 	assert.Equal(t, expectedSum, sum)
+}
+
+// Fuzz the image reader/writer a bit.
+func TestImageRandomReadsAndWrites(t *testing.T) {
+	image, err := qcow2.Create(filepath.Join(t.TempDir(), "test.qcow2"), 1<<30)
+	require.NoError(t, err)
+
+	imageSize, err := image.Size()
+	require.NoError(t, err)
+
+	for i := 0; i < 20; i++ {
+		blockSizeBig, err := rand.Int(rand.Reader, big.NewInt(1<<20))
+		assert.NoError(t, err)
+		blockSize := int(blockSizeBig.Int64()) + 1
+
+		offsetBig, err := rand.Int(rand.Reader, big.NewInt(imageSize-int64(blockSize)+1))
+		assert.NoError(t, err)
+		offset := offsetBig.Int64()
+
+		data := make([]byte, blockSize)
+		_, err = rand.Read(data)
+		require.NoError(t, err)
+
+		n, err := image.WriteAt(data, offset)
+		require.NoError(t, err)
+		require.Equal(t, n, len(data))
+
+		err = image.Sync()
+		require.NoError(t, err)
+
+		readData := make([]byte, blockSize)
+		n, err = image.ReadAt(readData, offset)
+		require.NoError(t, err)
+		require.Equal(t, n, len(data))
+
+		require.Equal(t, data, readData)
+	}
 }
 
 func downloadFile(path string, url string) error {
