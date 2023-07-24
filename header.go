@@ -97,17 +97,22 @@ func readHeader(f *os.File) (*HeaderAndAdditionalFields, error) {
 }
 
 func writeHeader(f *os.File, size int64) (*HeaderAndAdditionalFields, error) {
+	clusterBits := uint32(16)
+	clusterSize := uint64(1 << clusterBits)
+
+	// Round size up to the nearest cluster.
+	size = int64(clusterSize * ((uint64(size) + clusterSize - 1) / clusterSize))
+
 	hdr := Header{
 		Magic:         Magic,
 		Version:       Version3,
-		ClusterBits:   16,
+		ClusterBits:   clusterBits,
 		Size:          uint64(size),
 		CryptMethod:   NoEncryption,
 		RefcountOrder: 4,
 		HeaderLength:  uint32(unsafe.Sizeof(Header{})),
 	}
 
-	clusterSize := uint64(1 << hdr.ClusterBits)
 	l2Entries := clusterSize / 8
 
 	totalClusters := 1 + uint64(size)/clusterSize
