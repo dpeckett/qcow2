@@ -18,11 +18,14 @@
 package qcow2
 
 import (
+	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 type Image struct {
+	mu          sync.RWMutex
 	f           *os.File
 	hdr         *HeaderAndAdditionalFields
 	clusterSize int64
@@ -82,6 +85,9 @@ func (i *Image) Size() (int64, error) {
 }
 
 func (i *Image) Sync() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	return i.f.Sync()
 }
 
@@ -92,6 +98,9 @@ func (i *Image) Read(p []byte) (n int, err error) {
 }
 
 func (i *Image) ReadAt(p []byte, diskOffset int64) (n int, err error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
 	n = len(p)
 	if n == 0 {
 		return
@@ -105,7 +114,7 @@ func (i *Image) ReadAt(p []byte, diskOffset int64) (n int, err error) {
 
 	remaining := n
 	for remaining > 0 {
-		r, err := clusterReader(i.f, i.hdr, diskOffset)
+		r, err := i.clusterReader(diskOffset)
 		if err != nil {
 			return n - remaining, err
 		}
@@ -131,6 +140,9 @@ func (i *Image) Write(p []byte) (n int, err error) {
 }
 
 func (i *Image) WriteAt(p []byte, diskOffset int64) (n int, err error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	n = len(p)
 	if n == 0 {
 		return
@@ -143,7 +155,7 @@ func (i *Image) WriteAt(p []byte, diskOffset int64) (n int, err error) {
 
 	remaining := n
 	for remaining > 0 {
-		w, err := clusterWriter(i.f, i.hdr, diskOffset)
+		w, err := i.clusterWriter(diskOffset)
 		if err != nil {
 			return n - remaining, err
 		}
@@ -160,6 +172,18 @@ func (i *Image) WriteAt(p []byte, diskOffset int64) (n int, err error) {
 	}
 
 	return
+}
+
+// Snapshots are not implemented yet but we have some scaffolding in place.
+func (i *Image) Snapshot() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if err := i.incrementRefcounts(int64(i.hdr.L1TableOffset), int(i.hdr.L1Size)); err != nil {
+		return fmt.Errorf("failed to increment refcounts: %w", err)
+	}
+
+	return nil
 }
 
 func min(a, b int64) int64 {

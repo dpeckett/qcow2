@@ -219,6 +219,10 @@ func NewL2TableEntry(hdr *HeaderAndAdditionalFields, offset int64, compressed bo
 	return e
 }
 
+func (e L2TableEntry) Unallocated() bool {
+	return e == 0 || (!e.Compressed() && e&0x1 == 1)
+}
+
 func (e L2TableEntry) Used() bool {
 	return e&(1<<63) != 0
 }

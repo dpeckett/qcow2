@@ -21,18 +21,16 @@ import (
 	"compress/flate"
 	"fmt"
 	"io"
-	"os"
 )
 
-func clusterReader(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64) (io.Reader, error) {
-	clusterSize := int64(1 << hdr.ClusterBits)
-	bytesRemainingInCluster := clusterSize - (diskOffset % clusterSize)
+func (i *Image) clusterReader(diskOffset int64) (io.Reader, error) {
+	bytesRemainingInCluster := i.clusterSize - (diskOffset % i.clusterSize)
 
-	l2Entries := clusterSize / 8
-	l2Index := (diskOffset / clusterSize) % l2Entries
-	l1Index := (diskOffset / clusterSize) / l2Entries
+	l2Entries := i.clusterSize / 8
+	l2Index := (diskOffset / i.clusterSize) % l2Entries
+	l1Index := (diskOffset / i.clusterSize) / l2Entries
 
-	l1Table, err := readTable(f, int64(hdr.L1TableOffset), int(hdr.L1Size))
+	l1Table, err := readTable(i.f, int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +39,7 @@ func clusterReader(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64)
 
 	l2TableOffset := l1Entry.Offset()
 
-	l2Table, err := readTable(f, l2TableOffset, int(l2Entries))
+	l2Table, err := readTable(i.f, l2TableOffset, int(l2Entries))
 	if err != nil {
 		return nil, err
 	}
@@ -49,166 +47,161 @@ func clusterReader(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64)
 	l2Entry := L2TableEntry(l2Table[l2Index])
 
 	// Is it a hole?
-	if l2Entry == 0 || (!l2Entry.Compressed() && l2Entry&0x1 == 1) {
+	if l2Entry.Unallocated() {
 		return io.LimitReader(zeroReader{}, int64(bytesRemainingInCluster)), nil
 	}
 
 	// Is it a compressed cluster?
 	if l2Entry.Compressed() {
-		imageOffset := l2Entry.Offset(hdr)
+		imageOffset := l2Entry.Offset(i.hdr)
 
-		fr := flate.NewReader(io.LimitReader(newOffsetReader(f, imageOffset), l2Entry.CompressedSize(hdr)))
+		fr := flate.NewReader(io.LimitReader(newOffsetReader(i.f, imageOffset), l2Entry.CompressedSize(i.hdr)))
 
-		if _, err := io.CopyN(io.Discard, fr, diskOffset%clusterSize); err != nil {
+		if _, err := io.CopyN(io.Discard, fr, diskOffset%i.clusterSize); err != nil {
 			return nil, err
 		}
 
 		return io.LimitReader(fr, int64(bytesRemainingInCluster)), nil
 	}
 
-	imageOffset := l2Entry.Offset(hdr) + (diskOffset % clusterSize)
+	imageOffset := l2Entry.Offset(i.hdr) + (diskOffset % i.clusterSize)
 
-	return io.LimitReader(newOffsetReader(f, imageOffset), int64(bytesRemainingInCluster)), nil
+	return io.LimitReader(newOffsetReader(i.f, imageOffset), int64(bytesRemainingInCluster)), nil
 }
 
-func clusterWriter(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64) (io.Writer, error) {
-	clusterSize := int64(1 << hdr.ClusterBits)
-
-	refcount, err := getRefcount(f, hdr, diskOffset)
+func (i *Image) clusterWriter(diskOffset int64) (io.Writer, error) {
+	imageOffset, l2Entry, err := i.diskToImageOffset(diskOffset)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get image offset: %w", err)
 	}
 
-	var imageOffset int64
+	var refcount uint64
+	if !l2Entry.Unallocated() {
+		refcount, err = i.getRefcount(diskOffset)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if refcount == 0 {
-		imageOffsetClusterBase, err := allocateCluster(f, hdr)
+		imageOffsetClusterBase, err := i.allocateCluster()
 		if err != nil {
 			return nil, fmt.Errorf("failed to allocate cluster: %w", err)
 		}
 
-		if err := storeImageToDiskOffset(f, hdr, imageOffsetClusterBase, alignToClusterBoundary(hdr, diskOffset)); err != nil {
+		if err := i.updateL2Table(imageOffsetClusterBase, i.alignToClusterBoundary(diskOffset)); err != nil {
 			return nil, fmt.Errorf("failed to update L2 table: %w", err)
 		}
 
-		if err := setRefcount(f, hdr, diskOffset, 1); err != nil {
+		if err := i.setRefcount(diskOffset, 1); err != nil {
 			return nil, fmt.Errorf("failed to update refcount: %w", err)
 		}
 
-		imageOffset = imageOffsetClusterBase + (diskOffset % clusterSize)
-	} else if refcount == 1 {
-		// Perform an in-place write.
-		imageOffset, err = diskToImageOffset(f, hdr, diskOffset)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get image offset: %w", err)
-		}
-	} else {
+		imageOffset = imageOffsetClusterBase + (diskOffset % i.clusterSize)
+	} else if refcount > 1 {
 		// Copy the cluster and perform an in-place write.
-		imageOffsetClusterBase, err := copyCluster(f, hdr, diskOffset)
+		imageOffsetClusterBase, err := i.copyCluster(i.alignToClusterBoundary(diskOffset))
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy cluster: %w", err)
 		}
 
-		if err := storeImageToDiskOffset(f, hdr, imageOffsetClusterBase, alignToClusterBoundary(hdr, diskOffset)); err != nil {
+		if err := i.updateL2Table(imageOffsetClusterBase, i.alignToClusterBoundary(diskOffset)); err != nil {
 			return nil, fmt.Errorf("failed to update L2 table: %w", err)
 		}
 
-		if err := setRefcount(f, hdr, diskOffset, 1); err != nil {
+		if err := i.setRefcount(diskOffset, 1); err != nil {
 			return nil, fmt.Errorf("failed to update refcount: %w", err)
 		}
 
-		imageOffset = imageOffsetClusterBase + (diskOffset % clusterSize)
+		imageOffset = imageOffsetClusterBase + (diskOffset % i.clusterSize)
 	}
 
-	return newLimitWriter(newOffsetWriter(f, imageOffset), int64(clusterSize-(diskOffset%clusterSize))), nil
+	return newLimitWriter(newOffsetWriter(i.f, imageOffset), int64(i.clusterSize-(diskOffset%i.clusterSize))), nil
 }
 
-func allocateCluster(f *os.File, hdr *HeaderAndAdditionalFields) (int64, error) {
-	imageOffset, err := f.Seek(0, io.SeekEnd)
+func (i *Image) allocateCluster() (int64, error) {
+	imageOffset, err := i.f.Seek(0, io.SeekEnd)
 	if err != nil {
 		return 0, err
 	}
 
-	clusterSize := int64(1 << hdr.ClusterBits)
-	if _, err := io.CopyN(newOffsetWriter(f, imageOffset), zeroReader{}, int64(clusterSize)); err != nil {
+	clusterSize := int64(1 << i.hdr.ClusterBits)
+	if _, err := io.CopyN(newOffsetWriter(i.f, imageOffset), zeroReader{}, int64(clusterSize)); err != nil {
 		return 0, err
 	}
 
 	return imageOffset, nil
 }
 
-func copyCluster(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64) (int64, error) {
-	imageOffset, err := diskToImageOffset(f, hdr, diskOffset)
+func (i *Image) copyCluster(diskOffset int64) (int64, error) {
+	newImageOffset, err := i.allocateCluster()
 	if err != nil {
 		return 0, err
 	}
 
-	newImageOffset, err := allocateCluster(f, hdr)
+	imageOffset, _, err := i.diskToImageOffset(diskOffset)
 	if err != nil {
 		return 0, err
 	}
 
-	clusterSize := int64(1 << hdr.ClusterBits)
-	if _, err := io.CopyN(newOffsetWriter(f, newImageOffset), newOffsetReader(
-		f, alignToClusterBoundary(hdr, imageOffset)), int64(clusterSize)); err != nil {
+	if _, err := io.CopyN(newOffsetWriter(i.f, newImageOffset),
+		newOffsetReader(i.f, imageOffset), int64(i.clusterSize)); err != nil {
 		return 0, err
 	}
 
-	return newImageOffset + (imageOffset % clusterSize), nil
+	return newImageOffset, nil
 }
 
-func storeImageToDiskOffset(f *os.File, hdr *HeaderAndAdditionalFields, imageOffset, diskOffset int64) error {
-	clusterSize := int64(1 << hdr.ClusterBits)
+func (i *Image) updateL2Table(imageOffset, diskOffset int64) error {
+	l2Entries := i.clusterSize / 8
+	l2Index := (diskOffset / i.clusterSize) % l2Entries
+	l1Index := (diskOffset / i.clusterSize) / l2Entries
 
-	l2Entries := clusterSize / 8
-	l2Index := (diskOffset / clusterSize) % l2Entries
-	l1Index := (diskOffset / clusterSize) / l2Entries
-
-	l1Table, err := readTable(f, int64(hdr.L1TableOffset), int(hdr.L1Size))
+	l1Table, err := readTable(i.f, int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
 	if err != nil {
 		return err
 	}
 
 	l1Entry := L1TableEntry(l1Table[l1Index])
 
-	l2Table, err := readTable(f, l1Entry.Offset(), int(l2Entries))
+	l2Table, err := readTable(i.f, l1Entry.Offset(), int(l2Entries))
 	if err != nil {
 		return err
 	}
 
-	l2Table[l2Index] = uint64(NewL2TableEntry(hdr, imageOffset, false, 0))
+	l2Table[l2Index] = uint64(NewL2TableEntry(i.hdr, imageOffset, false, 0))
 
-	if err := writeTable(f, l1Entry.Offset(), l2Table); err != nil {
+	if err := writeTable(i.f, l1Entry.Offset(), l2Table); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func diskToImageOffset(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64) (int64, error) {
-	clusterSize := int64(1 << hdr.ClusterBits)
+func (i *Image) diskToImageOffset(diskOffset int64) (int64, L2TableEntry, error) {
+	clusterSize := int64(1 << i.hdr.ClusterBits)
 
 	l2Entries := clusterSize / 8
 	l2Index := (diskOffset / clusterSize) % l2Entries
 	l1Index := (diskOffset / clusterSize) / l2Entries
 
-	l1Table, err := readTable(f, int64(hdr.L1TableOffset), int(hdr.L1Size))
+	l1Table, err := readTable(i.f, int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	l1Entry := L1TableEntry(l1Table[l1Index])
 
-	l2Table, err := readTable(f, l1Entry.Offset(), int(l2Entries))
+	l2Table, err := readTable(i.f, l1Entry.Offset(), int(l2Entries))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	l2Entry := L2TableEntry(l2Table[l2Index])
 
-	return l2Entry.Offset(hdr) + (diskOffset % clusterSize), nil
+	return l2Entry.Offset(i.hdr) + (diskOffset % clusterSize), l2Entry, nil
 }
 
-func alignToClusterBoundary(hdr *HeaderAndAdditionalFields, offset int64) int64 {
-	clusterSize := int64(1 << hdr.ClusterBits)
-	return clusterSize * (offset / clusterSize)
+func (i *Image) alignToClusterBoundary(offset int64) int64 {
+	return i.clusterSize * (offset / i.clusterSize)
 }

@@ -22,37 +22,81 @@ import (
 	"os"
 )
 
-func getRefcount(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64) (uint64, error) {
-	refcountOffset, err := diskToRefcountOffset(f, hdr, diskOffset)
+func (i *Image) getRefcount(diskOffset int64) (uint64, error) {
+	refcountOffset, err := i.diskToRefcountOffset(diskOffset)
 	if err != nil {
 		return 0, err
 	}
 
-	refcountBits := int64(1 << hdr.RefcountOrder)
-	return readBits(f, refcountOffset, refcountBits)
+	refcountBits := int64(1 << i.hdr.RefcountOrder)
+	return readBits(i.f, refcountOffset, refcountBits)
 }
 
-func setRefcount(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64, refcount uint64) error {
-	refcountOffset, err := diskToRefcountOffset(f, hdr, diskOffset)
+func (i *Image) setRefcount(diskOffset int64, refcount uint64) error {
+	refcountOffset, err := i.diskToRefcountOffset(diskOffset)
 	if err != nil {
 		return err
 	}
 
-	refcountBits := int64(1 << hdr.RefcountOrder)
-	return writeBits(f, refcountOffset, refcountBits, refcount)
+	refcountBits := int64(1 << i.hdr.RefcountOrder)
+	return writeBits(i.f, refcountOffset, refcountBits, refcount)
 }
 
-func diskToRefcountOffset(f *os.File, hdr *HeaderAndAdditionalFields, diskOffset int64) (int64, error) {
-	refcountBits := int64(1 << hdr.RefcountOrder)
-	clusterSize := int64(1 << hdr.ClusterBits)
+func (i *Image) incrementRefcounts(l1TableOffset int64, l1Size int) error {
+	l2EntriesPerTable := i.clusterSize / 8
 
-	refcountBlockEntries := clusterSize * 8 / refcountBits
+	// 1. Go through each L1 entry.
+	l1Table, err := readTable(i.f, l1TableOffset, l1Size)
+	if err != nil {
+		return err
+	}
 
-	refcountBlockIndex := (diskOffset / clusterSize) % refcountBlockEntries
-	refcountTableIndex := (diskOffset / clusterSize) / refcountBlockEntries
+	for l1Index, l1EntryRaw := range l1Table {
+		l1Entry := L1TableEntry(l1EntryRaw)
 
-	refCountTableEntries := (int64(hdr.RefcountTableClusters) * clusterSize) / 8
-	refCountTable, err := readTable(f, int64(hdr.RefcountTableOffset), int(refCountTableEntries))
+		// 2. Go through each L2 entry.
+		l2Table, err := readTable(i.f, l1Entry.Offset(), int(l2EntriesPerTable))
+		if err != nil {
+			return err
+		}
+
+		for l2Index, l2EntryRaw := range l2Table {
+			l2Entry := L2TableEntry(l2EntryRaw)
+
+			if l2Entry.Unallocated() {
+				continue
+			}
+
+			// 3. Calculate the disk offset for the L2 entry.
+			diskOffset := int64(l1Index)*l2EntriesPerTable*i.clusterSize + int64(l2Index)*i.clusterSize
+
+			// 4. Get the refcount for the disk offset.
+			refcount, err := i.getRefcount(diskOffset)
+			if err != nil {
+				return err
+			}
+
+			// 5. Increment the refcount for the disk offset.
+			err = i.setRefcount(diskOffset, refcount+1)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (i *Image) diskToRefcountOffset(diskOffset int64) (int64, error) {
+	refcountBits := int64(1 << i.hdr.RefcountOrder)
+
+	refcountBlockEntries := i.clusterSize * 8 / refcountBits
+
+	refcountBlockIndex := (diskOffset / i.clusterSize) % refcountBlockEntries
+	refcountTableIndex := (diskOffset / i.clusterSize) / refcountBlockEntries
+
+	refCountTableEntries := (int64(i.hdr.RefcountTableClusters) * i.clusterSize) / 8
+	refCountTable, err := readTable(i.f, int64(i.hdr.RefcountTableOffset), int(refCountTableEntries))
 	if err != nil {
 		return 0, err
 	}

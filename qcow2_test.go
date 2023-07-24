@@ -91,6 +91,12 @@ func TestImageRandomReadsAndWrites(t *testing.T) {
 	imageSize, err := image.Size()
 	require.NoError(t, err)
 
+	type block struct {
+		offset int64
+		size   int
+	}
+	var writtenBlocks []block
+
 	for i := 0; i < 20; i++ {
 		blockSizeBig, err := rand.Int(rand.Reader, big.NewInt(1<<20))
 		assert.NoError(t, err)
@@ -100,6 +106,11 @@ func TestImageRandomReadsAndWrites(t *testing.T) {
 		assert.NoError(t, err)
 		offset := offsetBig.Int64()
 
+		writtenBlocks = append(writtenBlocks, block{
+			offset: offset,
+			size:   blockSize,
+		})
+
 		data := make([]byte, blockSize)
 		_, err = rand.Read(data)
 		require.NoError(t, err)
@@ -108,11 +119,34 @@ func TestImageRandomReadsAndWrites(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, n, len(data))
 
-		err = image.Sync()
-		require.NoError(t, err)
-
 		readData := make([]byte, blockSize)
 		n, err = image.ReadAt(readData, offset)
+		require.NoError(t, err)
+		require.Equal(t, n, len(data))
+
+		require.Equal(t, data, readData)
+	}
+
+	err = image.Sync()
+	require.NoError(t, err)
+
+	// Not a full snapshot but will increment the refcount.
+	err = image.Snapshot()
+	require.NoError(t, err)
+
+	// Now we'll update the blocks in random order.
+	writtenBlocks = randomPerm(writtenBlocks)
+	for _, b := range writtenBlocks {
+		data := make([]byte, b.size)
+		_, err = rand.Read(data)
+		require.NoError(t, err)
+
+		n, err := image.WriteAt(data, b.offset)
+		require.NoError(t, err)
+		require.Equal(t, n, len(data))
+
+		readData := make([]byte, b.size)
+		n, err = image.ReadAt(readData, b.offset)
 		require.NoError(t, err)
 		require.Equal(t, n, len(data))
 
@@ -154,4 +188,18 @@ func hashFile(path string) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func randomPerm[T any](values []T) []T {
+	length := big.NewInt(int64(len(values)))
+	result := make([]T, len(values))
+
+	for i := range result {
+		j, _ := rand.Int(rand.Reader, length)
+		result[i] = values[j.Int64()]
+		values = append(values[:j.Int64()], values[j.Int64()+1:]...)
+		length.Sub(length, big.NewInt(1))
+	}
+
+	return result
 }
