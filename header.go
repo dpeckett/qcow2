@@ -24,6 +24,8 @@ import (
 	"io"
 	"os"
 	"unsafe"
+
+	"github.com/goburrow/cache"
 )
 
 func readHeader(f *os.File) (*HeaderAndAdditionalFields, error) {
@@ -96,7 +98,7 @@ func readHeader(f *os.File) (*HeaderAndAdditionalFields, error) {
 	}, nil
 }
 
-func writeHeader(f *os.File, size int64) (*HeaderAndAdditionalFields, error) {
+func writeHeader(f *os.File, size int64) error {
 	clusterBits := uint32(16)
 	clusterSize := uint64(1 << clusterBits)
 
@@ -135,27 +137,34 @@ func writeHeader(f *os.File, size int64) (*HeaderAndAdditionalFields, error) {
 	 * 5. Refcount block/s
 	 */
 
+	i := &Image{
+		f: f,
+		tableCache: cache.NewLoadingCache(
+			func(key cache.Key) (cache.Value, error) { return nil, nil },
+		),
+	}
+
 	imageOffset := int64(clusterSize)
 
 	// write the L1 table
 	l1Table := make([]uint64, clusterSize/8)
 
-	for i := int64(0); i < int64(l2TableClusters); i++ {
-		l1Table[i] = uint64(NewL1TableEntry(imageOffset + (i+1)*int64(clusterSize)))
+	for j := int64(0); j < int64(l2TableClusters); j++ {
+		l1Table[j] = uint64(NewL1TableEntry(imageOffset + (j+1)*int64(clusterSize)))
 	}
 
-	if err := writeTable(f, imageOffset, l1Table); err != nil {
-		return nil, fmt.Errorf("failed to write L1 table: %w", err)
+	if err := i.writeTable(imageOffset, l1Table); err != nil {
+		return fmt.Errorf("failed to write L1 table: %w", err)
 	}
 	hdr.L1TableOffset = uint64(imageOffset)
 	imageOffset += int64(clusterSize)
 
 	// write the L2 table/s
-	for i := int64(0); i < int64(l2TableClusters); i++ {
+	for j := int64(0); j < int64(l2TableClusters); j++ {
 		l2Table := make([]uint64, clusterSize/8)
 
-		if err := writeTable(f, imageOffset, l2Table); err != nil {
-			return nil, fmt.Errorf("failed to write L2 table: %w", err)
+		if err := i.writeTable(imageOffset, l2Table); err != nil {
+			return fmt.Errorf("failed to write L2 table: %w", err)
 		}
 
 		imageOffset += int64(clusterSize)
@@ -164,21 +173,21 @@ func writeHeader(f *os.File, size int64) (*HeaderAndAdditionalFields, error) {
 	// write the refcount table
 	refcountTable := make([]uint64, (uint64(hdr.RefcountTableClusters)*clusterSize)/8)
 
-	for i := int64(0); i < int64(totalRefcountBlocks); i++ {
-		refcountTable[i] = uint64(imageOffset+(i+int64(hdr.RefcountTableClusters))*int64(clusterSize)) &^ ((1 << 9) - 1)
+	for j := int64(0); j < int64(totalRefcountBlocks); j++ {
+		refcountTable[j] = uint64(imageOffset+(j+int64(hdr.RefcountTableClusters))*int64(clusterSize)) &^ ((1 << 9) - 1)
 	}
 
-	if err := writeTable(f, imageOffset, refcountTable); err != nil {
-		return nil, fmt.Errorf("failed to write refcount table: %w", err)
+	if err := i.writeTable(imageOffset, refcountTable); err != nil {
+		return fmt.Errorf("failed to write refcount table: %w", err)
 	}
 
 	hdr.RefcountTableOffset = uint64(imageOffset)
 	imageOffset += int64(hdr.RefcountTableClusters) * int64(clusterSize)
 
 	// write the refcount block/s
-	for i := int64(0); i < int64(totalRefcountBlocks); i++ {
+	for j := int64(0); j < int64(totalRefcountBlocks); j++ {
 		if _, err := io.CopyN(newOffsetWriter(f, imageOffset), zeroReader{}, int64(clusterSize)); err != nil {
-			return nil, fmt.Errorf("failed to write refcount block: %w", err)
+			return fmt.Errorf("failed to write refcount block: %w", err)
 		}
 
 		imageOffset += int64(clusterSize)
@@ -186,7 +195,7 @@ func writeHeader(f *os.File, size int64) (*HeaderAndAdditionalFields, error) {
 
 	var encodedHdr bytes.Buffer
 	if err := binary.Write(&encodedHdr, binary.BigEndian, hdr); err != nil {
-		return nil, fmt.Errorf("failed to write image header: %w", err)
+		return fmt.Errorf("failed to write image header: %w", err)
 	}
 
 	extension := HeaderExtensionMetadata{
@@ -195,15 +204,13 @@ func writeHeader(f *os.File, size int64) (*HeaderAndAdditionalFields, error) {
 	}
 
 	if err := binary.Write(&encodedHdr, binary.BigEndian, extension); err != nil {
-		return nil, fmt.Errorf("failed to write end of header extension area: %w", err)
+		return fmt.Errorf("failed to write end of header extension area: %w", err)
 	}
 
 	// finally write the header
 	if _, err := io.CopyN(newOffsetWriter(f, 0), io.MultiReader(&encodedHdr, zeroReader{}), int64(clusterSize)); err != nil {
-		return nil, fmt.Errorf("failed to write header: %w", err)
+		return fmt.Errorf("failed to write header: %w", err)
 	}
 
-	return &HeaderAndAdditionalFields{
-		Header: hdr,
-	}, nil
+	return nil
 }

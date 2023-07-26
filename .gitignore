@@ -21,3 +21,4 @@
 go.work
 
 testdata/cirros-0.5.1-x86_64-disk.img
+*.prof

@@ -18,11 +18,11 @@
 package qcow2_test
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/gpu-ninja/qcow2"
+	"github.com/silverisntgold/randshiro"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,6 +39,11 @@ const (
 	testImage    = "testdata/cirros-0.5.1-x86_64-disk.img"
 	testImageURL = "https://download.cirros-cloud.net/0.5.1/cirros-0.5.1-x86_64-disk.img"
 )
+
+type block struct {
+	offset int64
+	size   int
+}
 
 func TestImageEndToEnd(t *testing.T) {
 	if _, err := os.Stat(testImage); os.IsNotExist(err) {
@@ -91,28 +97,28 @@ func TestImageRandomReadsAndWrites(t *testing.T) {
 	imageSize, err := image.Size()
 	require.NoError(t, err)
 
-	type block struct {
-		offset int64
-		size   int
-	}
-	var writtenBlocks []block
+	var blocks []block
+
+	rng := randshiro.New128pp()
+	randReader := &randshiroReader{rng: rng}
 
 	for i := 0; i < 20; i++ {
-		blockSizeBig, err := rand.Int(rand.Reader, big.NewInt(1<<20))
-		assert.NoError(t, err)
-		blockSize := int(blockSizeBig.Int64()) + 1
+		blockSize := int(rng.Uint64()>>(64-20)) + 1
+		offset := int64(rng.Uint64() % (uint64(imageSize) - uint64(blockSize) + 1))
 
-		offsetBig, err := rand.Int(rand.Reader, big.NewInt(imageSize-int64(blockSize)+1))
-		assert.NoError(t, err)
-		offset := offsetBig.Int64()
-
-		writtenBlocks = append(writtenBlocks, block{
+		newBlock := block{
 			offset: offset,
 			size:   blockSize,
-		})
+		}
+
+		if err := checkBlockOverlap(newBlock, blocks); err != nil {
+			continue
+		}
+
+		blocks = append(blocks, newBlock)
 
 		data := make([]byte, blockSize)
-		_, err = rand.Read(data)
+		_, err = randReader.Read(data)
 		require.NoError(t, err)
 
 		n, err := image.WriteAt(data, offset)
@@ -135,10 +141,10 @@ func TestImageRandomReadsAndWrites(t *testing.T) {
 	require.NoError(t, err)
 
 	// Now we'll update the blocks in random order.
-	writtenBlocks = randomPerm(writtenBlocks)
-	for _, b := range writtenBlocks {
+	randshiro.Shuffle(rng, blocks)
+	for _, b := range blocks {
 		data := make([]byte, b.size)
-		_, err = rand.Read(data)
+		_, err = randReader.Read(data)
 		require.NoError(t, err)
 
 		n, err := image.WriteAt(data, b.offset)
@@ -190,16 +196,36 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func randomPerm[T any](values []T) []T {
-	length := big.NewInt(int64(len(values)))
-	result := make([]T, len(values))
+type randshiroReader struct {
+	rng *randshiro.Gen
+}
 
-	for i := range result {
-		j, _ := rand.Int(rand.Reader, length)
-		result[i] = values[j.Int64()]
-		values = append(values[:j.Int64()], values[j.Int64()+1:]...)
-		length.Sub(length, big.NewInt(1))
+func (r *randshiroReader) Read(p []byte) (int, error) {
+	n := 0
+	for len(p[n:]) >= 8 {
+		binary.LittleEndian.PutUint64(p[n:], r.rng.Uint64())
+		n += 8
 	}
+	if n < len(p) {
+		remainingBytes := r.rng.Uint64()
+		for i := n; i < len(p); i++ {
+			p[i] = byte(remainingBytes)
+			remainingBytes >>= 8
+		}
+		n = len(p)
+	}
+	return n, nil
+}
 
-	return result
+func checkBlockOverlap(newBlock block, blocks []block) error {
+	for _, b := range blocks {
+		if overlap(newBlock.offset, int64(newBlock.size), b.offset, int64(b.size)) {
+			return fmt.Errorf("block overlap detected")
+		}
+	}
+	return nil
+}
+
+func overlap(a, asize, b, bsize int64) bool {
+	return a < b+bsize && b < a+asize
 }

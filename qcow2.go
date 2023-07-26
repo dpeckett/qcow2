@@ -22,14 +22,24 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"github.com/goburrow/cache"
+)
+
+const (
+	// Each table is going to be around a single cluster in size.
+	// So this will store up to 64MB of tables in memory.
+	maxCachedTables = 1000
 )
 
 type Image struct {
 	mu          sync.RWMutex
 	f           *os.File
 	hdr         *HeaderAndAdditionalFields
+	tableCache  cache.LoadingCache
 	clusterSize int64
-	cursor      int64
+	// TODO: how to make cursor safe for concurrent use?
+	cursor int64
 }
 
 func Create(path string, size int64) (*Image, error) {
@@ -38,16 +48,16 @@ func Create(path string, size int64) (*Image, error) {
 		return nil, err
 	}
 
-	hdr, err := writeHeader(f, size)
-	if err != nil {
+	if err := writeHeader(f, size); err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 
-	return &Image{
-		f:           f,
-		hdr:         hdr,
-		clusterSize: int64(1 << hdr.ClusterBits),
-	}, nil
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+
+	return Open(path, false)
 }
 
 func Open(path string, readOnly bool) (*Image, error) {
@@ -69,11 +79,17 @@ func Open(path string, readOnly bool) (*Image, error) {
 		return nil, err
 	}
 
-	return &Image{
+	i := &Image{
 		f:           f,
 		hdr:         hdr,
 		clusterSize: int64(1 << hdr.ClusterBits),
-	}, nil
+	}
+
+	i.tableCache = cache.NewLoadingCache(i.tableLoader,
+		cache.WithMaximumSize(maxCachedTables),
+	)
+
+	return i, nil
 }
 
 func (i *Image) Close() error {

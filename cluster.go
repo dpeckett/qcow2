@@ -30,7 +30,7 @@ func (i *Image) clusterReader(diskOffset int64) (io.Reader, error) {
 	l2Index := (diskOffset / i.clusterSize) % l2Entries
 	l1Index := (diskOffset / i.clusterSize) / l2Entries
 
-	l1Table, err := readTable(i.f, int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
+	l1Table, err := i.readTable(int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +39,7 @@ func (i *Image) clusterReader(diskOffset int64) (io.Reader, error) {
 
 	l2TableOffset := l1Entry.Offset()
 
-	l2Table, err := readTable(i.f, l2TableOffset, int(l2Entries))
+	l2Table, err := i.readTable(l2TableOffset, int(l2Entries))
 	if err != nil {
 		return nil, err
 	}
@@ -157,21 +157,21 @@ func (i *Image) updateL2Table(imageOffset, diskOffset int64) error {
 	l2Index := (diskOffset / i.clusterSize) % l2Entries
 	l1Index := (diskOffset / i.clusterSize) / l2Entries
 
-	l1Table, err := readTable(i.f, int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
+	l1Table, err := i.readTable(int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
 	if err != nil {
 		return err
 	}
 
 	l1Entry := L1TableEntry(l1Table[l1Index])
 
-	l2Table, err := readTable(i.f, l1Entry.Offset(), int(l2Entries))
+	l2Table, err := i.readTable(l1Entry.Offset(), int(l2Entries))
 	if err != nil {
 		return err
 	}
 
 	l2Table[l2Index] = uint64(NewL2TableEntry(i.hdr, imageOffset, false, 0))
 
-	if err := writeTable(i.f, l1Entry.Offset(), l2Table); err != nil {
+	if err := i.writeTable(l1Entry.Offset(), l2Table); err != nil {
 		return err
 	}
 
@@ -185,14 +185,14 @@ func (i *Image) diskToImageOffset(diskOffset int64) (int64, L2TableEntry, error)
 	l2Index := (diskOffset / clusterSize) % l2Entries
 	l1Index := (diskOffset / clusterSize) / l2Entries
 
-	l1Table, err := readTable(i.f, int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
+	l1Table, err := i.readTable(int64(i.hdr.L1TableOffset), int(i.hdr.L1Size))
 	if err != nil {
 		return 0, 0, err
 	}
 
 	l1Entry := L1TableEntry(l1Table[l1Index])
 
-	l2Table, err := readTable(i.f, l1Entry.Offset(), int(l2Entries))
+	l2Table, err := i.readTable(l1Entry.Offset(), int(l2Entries))
 	if err != nil {
 		return 0, 0, err
 	}

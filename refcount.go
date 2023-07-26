@@ -46,7 +46,7 @@ func (i *Image) incrementRefcounts(l1TableOffset int64, l1Size int) error {
 	l2EntriesPerTable := i.clusterSize / 8
 
 	// 1. Go through each L1 entry.
-	l1Table, err := readTable(i.f, l1TableOffset, l1Size)
+	l1Table, err := i.readTable(l1TableOffset, l1Size)
 	if err != nil {
 		return err
 	}
@@ -55,7 +55,7 @@ func (i *Image) incrementRefcounts(l1TableOffset int64, l1Size int) error {
 		l1Entry := L1TableEntry(l1EntryRaw)
 
 		// 2. Go through each L2 entry.
-		l2Table, err := readTable(i.f, l1Entry.Offset(), int(l2EntriesPerTable))
+		l2Table, err := i.readTable(l1Entry.Offset(), int(l2EntriesPerTable))
 		if err != nil {
 			return err
 		}
@@ -96,7 +96,7 @@ func (i *Image) diskToRefcountOffset(diskOffset int64) (int64, error) {
 	refcountTableIndex := (diskOffset / i.clusterSize) / refcountBlockEntries
 
 	refCountTableEntries := (int64(i.hdr.RefcountTableClusters) * i.clusterSize) / 8
-	refCountTable, err := readTable(i.f, int64(i.hdr.RefcountTableOffset), int(refCountTableEntries))
+	refCountTable, err := i.readTable(int64(i.hdr.RefcountTableOffset), int(refCountTableEntries))
 	if err != nil {
 		return 0, err
 	}

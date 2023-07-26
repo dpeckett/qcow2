@@ -18,30 +18,59 @@
 package qcow2
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
-	"os"
+
+	"github.com/goburrow/cache"
 )
 
-func readTable(f *os.File, imageOffset int64, n int) ([]uint64, error) {
+type tableKey struct {
+	imageOffset int64
+	n           int
+}
+
+func (i *Image) tableLoader(key cache.Key) (cache.Value, error) {
+	imageOffset := key.(tableKey).imageOffset
+	n := key.(tableKey).n
+
 	buf := make([]byte, 8*n)
-	if _, err := f.ReadAt(buf, imageOffset); err != nil {
+	if _, err := i.f.ReadAt(buf, imageOffset); err != nil {
 		return nil, fmt.Errorf("failed to read table: %w", err)
 	}
 
 	t := make([]uint64, n)
-	if err := binary.Read(bytes.NewReader(buf), binary.BigEndian, &t); err != nil {
-		return nil, fmt.Errorf("failed to read table: %w", err)
+	for i := range t {
+		t[i] = binary.BigEndian.Uint64(buf[i*8 : (i+1)*8])
 	}
 
 	return t, nil
 }
 
-func writeTable(f *os.File, imageOffset int64, t []uint64) error {
-	if err := binary.Write(newOffsetWriter(f, imageOffset), binary.BigEndian, &t); err != nil {
+func (i *Image) readTable(imageOffset int64, n int) ([]uint64, error) {
+	t, err := i.tableCache.Get(tableKey{imageOffset: imageOffset, n: n})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read table: %w", err)
+	}
+
+	return t.([]uint64), nil
+}
+
+func (i *Image) writeTable(imageOffset int64, t []uint64) error {
+	buf := make([]byte, 8*len(t))
+	for i, v := range t {
+		binary.BigEndian.PutUint64(buf[i*8:(i+1)*8], v)
+	}
+
+	_, err := i.f.WriteAt(buf, imageOffset)
+	if err != nil {
 		return fmt.Errorf("failed to write table: %w", err)
 	}
+
+	// TODO: In the future when we support growing the table, we will need to
+	// come up with a smarter way to invalidate the cache to avoid leaking
+	// memory. But given we are using LRU it'll be evicted pretty quickly
+	// anyway.
+	i.tableCache.Invalidate(&tableKey{imageOffset: imageOffset, n: len(t)})
 
 	return nil
 }
