@@ -38,8 +38,8 @@ type Image struct {
 	hdr         *HeaderAndAdditionalFields
 	tableCache  cache.LoadingCache
 	clusterSize int64
-	// TODO: how to make cursor safe for concurrent use?
-	cursor int64
+	cursorMu    sync.Mutex
+	cursor      int64
 }
 
 func Create(path string, size int64) (*Image, error) {
@@ -108,6 +108,9 @@ func (i *Image) Sync() error {
 }
 
 func (i *Image) Read(p []byte) (n int, err error) {
+	i.cursorMu.Lock()
+	defer i.cursorMu.Unlock()
+
 	n, err = i.ReadAt(p, i.cursor)
 	i.cursor += int64(n)
 	return
@@ -140,7 +143,7 @@ func (i *Image) ReadAt(p []byte, diskOffset int64) (n int, err error) {
 			return n - remaining, err
 		}
 
-		// advance to the next cluster
+		// advance to the next cluster.
 		diskOffset += int64(bytesInCluster)
 		p = p[bytesInCluster:]
 		remaining -= bytesInCluster
@@ -150,6 +153,9 @@ func (i *Image) ReadAt(p []byte, diskOffset int64) (n int, err error) {
 }
 
 func (i *Image) Write(p []byte) (n int, err error) {
+	i.cursorMu.Lock()
+	defer i.cursorMu.Unlock()
+
 	n, err = i.WriteAt(p, i.cursor)
 	i.cursor += int64(n)
 	return
@@ -181,7 +187,7 @@ func (i *Image) WriteAt(p []byte, diskOffset int64) (n int, err error) {
 			return n - remaining, err
 		}
 
-		// advance to the next cluster
+		// advance to the next cluster.
 		diskOffset += int64(bytesInCluster)
 		p = p[bytesInCluster:]
 		remaining -= bytesInCluster
